@@ -36,12 +36,16 @@ instance = ec2.Instance(getMetadataValue('instance-id'))
 
 #assuming eth0 is the destination
 local_eni_id = None
-local_eni_ip_address = None # Stash current private IP of this host, assuming only 1
-while local_eni_id is None:
-    for interface in instance.network_interfaces_attribute:
-        if interface['Attachment']['DeviceIndex'] == 1:
-            local_eni_id = interface['NetworkInterfaceId']
-            local_eni_ip_address = interface['PrivateIpAddress']
+local_eni_ip_address = None # Stash current private IP of this host.
+
+# Assume the local_eni is DeviceIndex 0 if there is only 1 interface
+# Or assume the local_eni is DeviceIndex 1 if there is more than 1
+# TODO this is a temporary fix, this should really come from a conf file
+# or something
+for interface in instance.network_interfaces_attribute:
+    if interface['Attachment']['DeviceIndex'] < 2:
+        local_eni_id = interface['NetworkInterfaceId']
+        local_eni_ip_address = interface['PrivateIpAddress']
 
 logger.info("Local eni is {}".format(local_eni_id))
 logger.info('Watching {}'.format(route_tables))
