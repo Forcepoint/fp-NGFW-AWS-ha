@@ -1,0 +1,90 @@
+#!/usr/bin/python
+import boto3, time, requests, socket, os, sys
+import botocore.exceptions
+
+from sg.waagent.logger import NGFwLogger
+from azurelinuxagent.common import logger
+
+LOGFILE = "/data/diagnostics/awsha-{}.log".format(os.getpid())
+logger.DEFAULT_LOGGER = NGFwLogger(LOGFILE)
+
+ROUTE_TABLE_FILE="/data/route-tables"
+PROBE_PORT=22
+TIMEOUT=2
+EC2_METADATA_URL_BASE='http://169.254.169.254/latest'
+EC2_METADATA_URL="{}/meta-data".format(EC2_METADATA_URL_BASE)
+OPENSSL_CACERT_FILE = "/data/config/policy/latest/inspection/ca-bundle.pem"
+
+def getMetadata(url):
+    r = requests.get(url)
+    #Metadata service returns plaintext here
+    return requests.get(url).text
+
+def getMetadataValue(key):
+    return getMetadata("{}/{}".format(EC2_METADATA_URL,key))
+
+os.environ['REQUESTS_CA_BUNDLE'] = OPENSSL_CACERT_FILE
+ec2 = boto3.resource('ec2', region_name='us-east-1',api_version='2016-09-15')
+#route tables to monitor
+route_tables = []
+with open(ROUTE_TABLE_FILE) as f:
+    candidate = f.readline()
+    if candidate.startswith('rtb-'):
+        route_table = ec2.RouteTable(candidate.rstrip())
+        route_tables.append(route_table)
+instance = ec2.Instance(getMetadataValue('instance-id'))
+
+#assuming eth0 is the destination
+local_eni_id = None
+local_eni_ip_address = None # Stash current private IP of this host, assuming only 1
+while local_eni_id is None:
+    for interface in instance.network_interfaces_attribute:
+        if interface['Attachment']['DeviceIndex'] == 1:
+            local_eni_id = interface['NetworkInterfaceId']
+            local_eni_ip_address = interface['PrivateIpAddress']
+
+logger.info("Local eni is {}".format(local_eni_id))
+logger.info('Watching {}'.format(route_tables))
+while True:
+    time.sleep(1)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    for table in route_tables:
+        table.reload()
+        for route in table.routes_attribute:
+            need_swap = False
+            if 'NetworkInterfaceId' not in route.keys():
+                continue #route not going to NGFW, skipping
+            remote_eni = ec2.NetworkInterface(route['NetworkInterfaceId'])
+            try:
+                current_ip = remote_eni.private_ip_address
+                if route['State'] == 'blackhole' :
+                    #do not even test route as it is detected as broken by platform
+                    logger.info('AWS detected {} as blackhole'.format(remote_eni))
+                    need_swap = True
+                elif current_ip == local_eni_ip_address:
+                    pass # Skipping probe, we are the current route eni gateway
+                else:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(TIMEOUT)
+                    try:
+                        s.connect((current_ip,PROBE_PORT))
+                    except socket.error, e:
+                        logger.info("Error probing {} port {},{}".format(
+                            current_ip,PROBE_PORT,e))
+                        need_swap = True
+                    if not need_swap:
+                        s.close
+                if need_swap:
+                    #modify target interface to ours
+                    route_obj = ec2.Route(table.id,route['DestinationCidrBlock'])
+                    logger.info('Modifying route to use local eni {}'.format(local_eni_id))
+                    logger.info('Previous route: {}'.format(route))
+                    route_obj.replace(route['DestinationCidrBlock'],
+                            NetworkInterfaceId=local_eni_id)
+                    logger.info('Modifying route done')
+
+            except botocore.exceptions.ClientError as e:
+                logger.error(str(e))
+
+
