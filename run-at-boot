@@ -13,7 +13,12 @@ PROBE_PORT=22
 TIMEOUT=2
 EC2_METADATA_URL_BASE='http://169.254.169.254/latest'
 EC2_METADATA_URL="{}/meta-data".format(EC2_METADATA_URL_BASE)
+
 OPENSSL_CACERT_FILE = "/data/config/policy/latest/inspection/ca-bundle.pem"
+if not os.path.exists(OPENSSL_CACERT_FILE):
+    OPENSSL_CACERT_FILE = "/data/config/tls/ca-bundle.pem"
+    assert os.path.exists(OPENSSL_CACERT_FILE)
+logger.info("PEM bundle found: {}".format(OPENSSL_CACERT_FILE))
 
 def getMetadata(url):
     r = requests.get(url)
